@@ -1,44 +1,60 @@
+mod login;
+mod messages;
+mod register;
+mod user;
+
 use axum::routing::get;
 use serde_json::Value;
 use socketioxide::{
-    extract::{AckSender, Data, SocketRef},
+    extract::{Data, SocketRef},
     SocketIo,
 };
+use sqlx::sqlite::SqlitePoolOptions;
+use tower::ServiceBuilder;
+use tower_http::cors::CorsLayer;
 use tracing::info;
 use tracing_subscriber::FmtSubscriber;
 
-async fn on_connect(socket: SocketRef, Data(data): Data<Value>) {
-    info!("Socket.IO connected: {:?} {:?}", socket.ns(), socket.id);
-    socket.emit("auth", &data).ok();
+use crate::{login::login, messages::message, register::register};
 
-    socket.on("message", async |socket: SocketRef, Data::<Value>(data)| {
-        info!("Received event: {:?}", data);
-        socket.emit("message-back", &data).ok();
+async fn root(socket: SocketRef, Data(_): Data<Value>) {
+    info!("Connected to {:?} with id {:?}", socket.ns(), socket.id);
+
+    socket.on_disconnect(async |socket: SocketRef| {
+        info!("Disconnect {:?}", socket.ns());
     });
-
-    socket.on(
-        "message-with-ack",
-        async |Data::<Value>(data), ack: AckSender| {
-            info!(?data, "Received event");
-            ack.send(&data).ok();
-        },
-    );
 }
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
     tracing::subscriber::set_global_default(FmtSubscriber::default())?;
 
+    let db = SqlitePoolOptions::new()
+        .max_connections(5)
+        .min_connections(1)
+        .connect("sqlite://./data/users.sqlite")
+        .await?;
+
+    sqlx::migrate!().run(&db).await?;
+
     let (layer, io) = SocketIo::builder()
         .max_payload(10_000_000)
         .max_buffer_size(10_000)
+        .with_state(db.clone())
         .build_layer();
 
-    io.ns("/", on_connect);
+    io.ns("/", root);
+    io.ns("/message", message);
+    io.ns("/login", login);
+    io.ns("/register", register);
 
     let app = axum::Router::new()
         .route("/", get(|| async { "Hello, World" }))
-        .layer(layer);
+        .layer(
+            ServiceBuilder::new()
+                .layer(CorsLayer::permissive())
+                .layer(layer),
+        );
 
     info!("Starting server");
 
