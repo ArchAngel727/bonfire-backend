@@ -4,14 +4,15 @@ mod crypto_manager;
 mod login;
 mod messages;
 mod register;
+mod session;
 mod user;
 
 use axum::routing::get;
 use dotenv::dotenv;
 use serde_json::Value;
 use socketioxide::{
-    extract::{Data, SocketRef},
     SocketIo,
+    extract::{Data, SocketRef},
 };
 use sqlx::sqlite::SqlitePoolOptions;
 use tower::ServiceBuilder;
@@ -19,7 +20,9 @@ use tower_http::cors::CorsLayer;
 use tracing::info;
 use tracing_subscriber::FmtSubscriber;
 
-use crate::{auth::auth, login::login, messages::message, register::register};
+use crate::{
+    auth::auth, crypto_manager::CryptoManager, login::login, messages::message, register::register,
+};
 
 async fn root(socket: SocketRef, Data(_): Data<Value>) {
     info!("Connected to {:?} with id {:?}", socket.ns(), socket.id);
@@ -41,12 +44,15 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .connect("sqlite://./data/users.sqlite")
         .await?;
 
+    let cm = CryptoManager::from_env()?;
+
     sqlx::migrate!().run(&db).await?;
 
     let (layer, io) = SocketIo::builder()
         .max_payload(10_000_000)
         .max_buffer_size(10_000)
         .with_state(db.clone())
+        .with_state(cm.clone())
         .build_layer();
 
     io.ns("/", root);

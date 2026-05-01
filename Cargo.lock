@@ -190,6 +190,7 @@ dependencies = [
  "sha2 0.11.0",
  "socketioxide",
  "sqlx",
+ "thiserror",
  "tokio",
  "tower",
  "tower-http",
