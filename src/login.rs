@@ -3,14 +3,15 @@ use socketioxide::extract::{AckSender, Data, SocketRef, State};
 use sqlx::{Pool, Sqlite};
 use tracing::info;
 
-use crate::user::UserRequestData;
+use crate::{
+    cookie::{Cookie, SignedCookie},
+    user::UserLoginRequestData,
+};
 
 pub async fn login(socket: SocketRef) {
-    info!("Connected to {:?} with id {:?}", socket.ns(), socket.id);
-
     socket.on(
         "login",
-        async |Data::<UserRequestData>(data), ack: AckSender, db: State<Pool<Sqlite>>| {
+        async |Data::<UserLoginRequestData>(data), ack: AckSender, db: State<Pool<Sqlite>>| {
             info!("on login, data: {:?}", data);
 
             if let Ok(user) = sqlx::query!(
@@ -29,7 +30,14 @@ pub async fn login(socket: SocketRef) {
                     .verify_password(data.password.as_bytes(), &hash)
                     .is_ok()
                 {
-                    ack.send("Login complete").ok();
+                    let Some(id) = user.user_id else {
+                        ack.send("500").ok();
+                        return;
+                    };
+
+                    let cookie = Cookie::new(id.try_into().unwrap());
+                    let sc = SignedCookie::new(cookie);
+                    ack.send(&sc).ok();
                 } else {
                     ack.send("Invalid login data").ok();
                 }

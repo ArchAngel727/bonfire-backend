@@ -1,9 +1,13 @@
+mod auth;
+mod cookie;
+mod crypto_manager;
 mod login;
 mod messages;
 mod register;
 mod user;
 
 use axum::routing::get;
+use dotenv::dotenv;
 use serde_json::Value;
 use socketioxide::{
     extract::{Data, SocketRef},
@@ -15,7 +19,7 @@ use tower_http::cors::CorsLayer;
 use tracing::info;
 use tracing_subscriber::FmtSubscriber;
 
-use crate::{login::login, messages::message, register::register};
+use crate::{auth::auth, login::login, messages::message, register::register};
 
 async fn root(socket: SocketRef, Data(_): Data<Value>) {
     info!("Connected to {:?} with id {:?}", socket.ns(), socket.id);
@@ -28,6 +32,8 @@ async fn root(socket: SocketRef, Data(_): Data<Value>) {
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
     tracing::subscriber::set_global_default(FmtSubscriber::default())?;
+
+    dotenv()?;
 
     let db = SqlitePoolOptions::new()
         .max_connections(5)
@@ -47,6 +53,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     io.ns("/message", message);
     io.ns("/login", login);
     io.ns("/register", register);
+    io.ns("/auth", auth);
 
     let app = axum::Router::new()
         .route("/", get(|| async { "Hello, World" }))

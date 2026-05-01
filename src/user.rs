@@ -8,7 +8,13 @@ struct UserDBData {
 }
 
 #[derive(Serialize, Deserialize, Debug)]
-pub struct UserRequestData {
+pub struct UserLoginRequestData {
+    pub username: String,
+    pub password: String,
+}
+
+#[derive(Serialize, Deserialize, Debug)]
+pub struct UserRegisterRequestData {
     pub username: String,
     pub password: String,
 }

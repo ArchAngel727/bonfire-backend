@@ -7,39 +7,39 @@ use sqlx::{Pool, Sqlite};
 use tracing::{error, info};
 use uuid::Uuid;
 
-use crate::user::UserRequestData;
+use crate::user::UserRegisterRequestData;
 
 pub async fn register(socket: SocketRef) {
-    info!("Connected to {:?} with id {:?}", socket.ns(), socket.id);
-
     socket.on(
         "register",
-        async |Data::<UserRequestData>(data), ack: AckSender, db: State<Pool<Sqlite>>| {
+        async |Data::<UserRegisterRequestData>(data), ack: AckSender, db: State<Pool<Sqlite>>| {
             let user_id = Uuid::new_v4().into_bytes().to_vec();
 
             let salt = SaltString::generate(&mut OsRng);
             let argon2 = Argon2::default();
             let hashed_password = argon2.hash_password(data.password.as_bytes(), &salt);
 
-            info!("{:?}", hashed_password);
+            if let Ok(password_hash) = hashed_password {
+                let pwd_hash = password_hash.to_string();
 
-            let db_response = sqlx::query!(
-                "INSERT INTO users (user_id, username, hashed_pw) values (?1, ?2, ?3)",
-                user_id,
-                data.username,
-                data.password
-            )
-            .execute(&*db)
-            .await;
+                let db_response = sqlx::query!(
+                    "INSERT INTO users (user_id, username, hashed_pw) values (?1, ?2, ?3)",
+                    user_id,
+                    data.username,
+                    pwd_hash
+                )
+                .execute(&*db)
+                .await;
 
-            match db_response {
-                Ok(result) => {
-                    info!("{:?}", result);
-                    ack.send(&user_id).ok();
-                }
-                Err(err) => {
-                    error!("{:?}", err);
-                    ack.send("Error").ok();
+                match db_response {
+                    Ok(result) => {
+                        info!("{:?}", result);
+                        ack.send(&user_id).ok();
+                    }
+                    Err(err) => {
+                        error!("{:?}", err);
+                        ack.send("Error").ok();
+                    }
                 }
             }
         },
