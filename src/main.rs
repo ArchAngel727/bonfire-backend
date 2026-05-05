@@ -41,7 +41,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let db = SqlitePoolOptions::new()
         .max_connections(5)
         .min_connections(1)
-        .connect("sqlite://./data/users.sqlite")
+        .connect("sqlite://./data/db.sqlite")
         .await?;
 
     let cm = CryptoManager::from_env()?;

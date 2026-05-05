@@ -1,15 +1,16 @@
 use chrono::{DateTime, Duration, Utc};
 use serde::{Deserialize, Serialize};
+use uuid::Uuid;
 
 #[derive(Serialize, Deserialize)]
 pub struct Session {
-    pub user_id: Vec<u8>,
+    pub user_id: Uuid,
     pub created_at: DateTime<Utc>,
     pub expires_at: DateTime<Utc>,
 }
 
 impl Session {
-    pub fn new(user_id: Vec<u8>) -> Self {
+    pub fn new(user_id: Uuid) -> Self {
         Self {
             user_id,
             created_at: Utc::now(),

@@ -1,10 +1,11 @@
 use serde::{Deserialize, Serialize};
+use uuid::Uuid;
 
 #[derive(Serialize, Deserialize, Debug)]
-struct UserDBData {
-    user_id: Vec<u8>,
-    username: String,
-    hashed_pw: String,
+pub struct UserDBData {
+    pub user_id: Uuid,
+    pub username: String,
+    pub hashed_pw: String,
 }
 
 #[derive(Serialize, Deserialize, Debug)]
@@ -17,4 +18,9 @@ pub struct UserLoginRequestData {
 pub struct UserRegisterRequestData {
     pub username: String,
     pub password: String,
+}
+
+#[derive(Clone)]
+pub struct AuthedUser {
+    pub user_id: Uuid,
 }
