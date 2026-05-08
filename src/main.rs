@@ -1,4 +1,5 @@
 mod auth;
+mod auth_middlewear;
 mod cookie;
 mod crypto_manager;
 mod login;
@@ -13,15 +14,17 @@ use serde_json::Value;
 use socketioxide::{
     SocketIo,
     extract::{Data, SocketRef},
+    handler::ConnectHandler,
 };
 use sqlx::sqlite::SqlitePoolOptions;
 use tower::ServiceBuilder;
 use tower_http::cors::CorsLayer;
 use tracing::info;
-use tracing_subscriber::FmtSubscriber;
+use tracing_subscriber::{EnvFilter, FmtSubscriber};
 
 use crate::{
-    auth::auth, crypto_manager::CryptoManager, login::login, messages::message, register::register,
+    auth::auth, auth_middlewear::auth_middlewear, crypto_manager::CryptoManager, login::login,
+    messages::message, register::register,
 };
 
 async fn root(socket: SocketRef, Data(_): Data<Value>) {
@@ -34,7 +37,11 @@ async fn root(socket: SocketRef, Data(_): Data<Value>) {
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
-    tracing::subscriber::set_global_default(FmtSubscriber::default())?;
+    let filter = EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("info"));
+
+    tracing::subscriber::set_global_default(
+        FmtSubscriber::builder().with_env_filter(filter).finish(),
+    )?;
 
     dotenv()?;
 
@@ -59,7 +66,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     io.ns("/message", message);
     io.ns("/login", login);
     io.ns("/register", register);
-    io.ns("/auth", auth);
+    io.ns("/auth", auth.with(auth_middlewear));
 
     let app = axum::Router::new()
         .route("/", get(|| async { "Hello, World" }))

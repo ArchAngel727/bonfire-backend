@@ -4,7 +4,7 @@ use socketioxide::extract::{AckSender, Data, SocketRef, State};
 use sqlx::{Pool, Sqlite};
 use uuid::Uuid;
 
-use crate::{cookie::Cookie, crypto_manager::CryptoManager, user::AuthedUser};
+use crate::{cookie::Cookie, user::AuthedUser};
 
 #[derive(Serialize, Deserialize, Debug)]
 #[serde(tag = "status")]
@@ -19,13 +19,7 @@ pub async fn auth(socket: SocketRef) {
         async |Data::<Cookie>(data),
                ack: AckSender,
                socket: SocketRef,
-               State(db): State<Pool<Sqlite>>,
-               State(crypto_manager): State<CryptoManager>| {
-            if !crypto_manager.verify(&data.session_id, &data.signature) {
-                ack.send("Hellnah").ok();
-                return;
-            }
-
+               State(db): State<Pool<Sqlite>>| {
             let session_id_bytes = &data.session_id[..];
             let now = Utc::now();
             let session = match sqlx::query!(
