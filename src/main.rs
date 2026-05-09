@@ -8,7 +8,10 @@ mod register;
 mod session;
 mod user;
 
+use std::time::Duration;
+
 use axum::routing::get;
+use chrono::Utc;
 use dotenv::dotenv;
 use serde_json::Value;
 use socketioxide::{
@@ -16,7 +19,8 @@ use socketioxide::{
     extract::{Data, SocketRef},
     handler::ConnectHandler,
 };
-use sqlx::sqlite::SqlitePoolOptions;
+use sqlx::{Pool, Sqlite, sqlite::SqlitePoolOptions};
+use tokio::time::interval;
 use tower::ServiceBuilder;
 use tower_http::cors::CorsLayer;
 use tracing::info;
@@ -35,6 +39,23 @@ async fn root(socket: SocketRef, Data(_): Data<Value>) {
     });
 }
 
+async fn spawn_ticker(db: Pool<Sqlite>) {
+    tokio::spawn(async move {
+        let mut ticker = interval(Duration::from_secs(300));
+        loop {
+            ticker.tick().await;
+            let now = Utc::now();
+
+            if let Err(e) = sqlx::query!("DELETE FROM sessions WHERE expires_at < ?1", now)
+                .execute(&db)
+                .await
+            {
+                tracing::error!("session clean failed: {}", e);
+            }
+        }
+    });
+}
+
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let filter = EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("info"));
@@ -45,15 +66,15 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     dotenv()?;
 
+    let cm = CryptoManager::from_env()?;
     let db = SqlitePoolOptions::new()
         .max_connections(5)
         .min_connections(1)
         .connect("sqlite://./data/db.sqlite")
         .await?;
 
-    let cm = CryptoManager::from_env()?;
-
     sqlx::migrate!().run(&db).await?;
+    spawn_ticker(db.clone()).await;
 
     let (layer, io) = SocketIo::builder()
         .max_payload(10_000_000)
