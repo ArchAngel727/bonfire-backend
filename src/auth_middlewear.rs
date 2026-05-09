@@ -5,7 +5,7 @@ use thiserror::Error;
 use tracing::debug;
 use uuid::Uuid;
 
-use crate::{cookie::Cookie, crypto_manager::CryptoManager, session::Session};
+use crate::{cookie::Cookie, crypto_manager::CryptoManager, session::Session, user::UserID};
 
 #[derive(Debug, Error)]
 pub enum AuthError {
@@ -34,28 +34,25 @@ pub async fn auth_middlewear(
     }
 
     let slice = &cookie.session_id[..];
-
-    let Some(session) = sqlx::query_as!(
+    let session = sqlx::query_as!(
         Session,
         r#"SELECT
-          user_id as "user_id: Uuid",
-          created_at as "created_at: DateTime<Utc>",
-          expires_at as "expires_at: DateTime<Utc>"
-        FROM sessions WHERE
-        session_id = ?1"#,
+                user_id as "user_id: Uuid",
+                created_at as "created_at: DateTime<Utc>",
+                expires_at as "expires_at: DateTime<Utc>"
+                FROM sessions WHERE
+                session_id = ?1"#,
         slice
     )
     .fetch_optional(&db)
     .await?
-    else {
-        return Err(AuthError::Invalid);
-    };
+    .ok_or(AuthError::Invalid)?;
 
     if Utc::now() > session.expires_at {
         return Err(AuthError::Expired);
     }
 
-    socket.extensions.insert(session.user_id);
+    socket.extensions.insert(UserID(session.user_id));
 
     Ok(())
 }

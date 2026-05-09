@@ -21,6 +21,4 @@ pub struct UserRegisterRequestData {
 }
 
 #[derive(Clone)]
-pub struct AuthedUser {
-    pub user_id: Uuid,
-}
+pub struct UserID(pub Uuid);

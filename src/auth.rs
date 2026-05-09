@@ -4,7 +4,7 @@ use socketioxide::extract::{AckSender, Data, SocketRef, State};
 use sqlx::{Pool, Sqlite};
 use uuid::Uuid;
 
-use crate::{cookie::Cookie, user::AuthedUser};
+use crate::{cookie::Cookie, user::UserID};
 
 #[derive(Serialize, Deserialize, Debug)]
 #[serde(tag = "status")]
@@ -45,9 +45,7 @@ pub async fn auth(socket: SocketRef) {
                 }
             };
 
-            socket.extensions.insert(AuthedUser {
-                user_id: session.user_id,
-            });
+            socket.extensions.insert(UserID(session.user_id));
 
             let new_expires_at = now + chrono::Duration::days(7);
             let _ = sqlx::query!(
