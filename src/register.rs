@@ -1,19 +1,23 @@
 use argon2::{
-    password_hash::{rand_core::OsRng, SaltString},
     Argon2, PasswordHasher,
+    password_hash::{SaltString, rand_core::OsRng},
 };
 use socketioxide::extract::{AckSender, Data, SocketRef, State};
 use sqlx::{Pool, Sqlite};
 use tracing::{error, info};
 use uuid::Uuid;
 
-use crate::user::UserRegisterRequestData;
+use crate::{admin::persist_admin_to_env, permissions::AdminId, user::UserRegisterRequestData};
 
 pub async fn register(socket: SocketRef) {
     socket.on(
         "register",
-        async |Data::<UserRegisterRequestData>(data), ack: AckSender, db: State<Pool<Sqlite>>| {
-            let user_id = Uuid::new_v4().into_bytes().to_vec();
+        async |Data::<UserRegisterRequestData>(data),
+               ack: AckSender,
+               db: State<Pool<Sqlite>>,
+               State(admin): State<AdminId>| {
+            let user_uuid = Uuid::new_v4();
+            let user_id = user_uuid.into_bytes().to_vec();
 
             let salt = SaltString::generate(&mut OsRng);
             let argon2 = Argon2::default();
@@ -34,6 +38,13 @@ pub async fn register(socket: SocketRef) {
                 match db_response {
                     Ok(result) => {
                         info!("{:?}", result);
+
+                        if admin.is_unset() {
+                            admin.set(user_uuid);
+                            persist_admin_to_env(&user_uuid);
+                            info!("Bootstraping admin");
+                        }
+
                         ack.send(&user_id).ok();
                     }
                     Err(err) => {

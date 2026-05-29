@@ -41,10 +41,10 @@ async fn handle_login(
     let user = match sqlx::query_as!(
         UserDBData,
         r#"SELECT
-                user_id as "user_id: Uuid",
-                username,
-                hashed_pw
-                FROM users WHERE username = ?1"#,
+            user_id as "user_id: Uuid",
+            username,
+            hashed_pw
+        FROM users WHERE username = ?1"#,
         data.username
     )
     .fetch_one(db)

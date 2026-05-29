@@ -34,7 +34,6 @@ pub async fn auth(socket: SocketRef) {
             {
                 Ok(Some(row)) => row,
                 Ok(None) => {
-                    // no session or expired
                     ack.send(&AuthResponse::Failed).ok();
                     return;
                 }

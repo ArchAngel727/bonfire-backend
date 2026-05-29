@@ -1,9 +1,13 @@
+mod admin;
 mod auth;
 mod auth_middlewear;
+mod channel;
+mod channels;
 mod cookie;
 mod crypto_manager;
 mod login;
 mod messages;
+mod permissions;
 mod register;
 mod session;
 mod user;
@@ -27,8 +31,13 @@ use tracing::info;
 use tracing_subscriber::{EnvFilter, FmtSubscriber};
 
 use crate::{
-    auth::auth, auth_middlewear::auth_middlewear, crypto_manager::CryptoManager, login::login,
-    messages::message, register::register,
+    admin::{admin, load_admin_from_env},
+    auth::auth,
+    auth_middlewear::auth_middlewear,
+    crypto_manager::CryptoManager,
+    login::login,
+    messages::message,
+    register::register,
 };
 
 async fn root(socket: SocketRef, Data(_): Data<Value>) {
@@ -76,11 +85,14 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     sqlx::migrate!().run(&db).await?;
     spawn_ticker(db.clone()).await;
 
+    let admin_id = load_admin_from_env();
+
     let (layer, io) = SocketIo::builder()
         .max_payload(10_000_000)
         .max_buffer_size(10_000)
         .with_state(db.clone())
         .with_state(cm.clone())
+        .with_state(admin_id)
         .build_layer();
 
     io.ns("/", root);
@@ -88,6 +100,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     io.ns("/login", login);
     io.ns("/register", register);
     io.ns("/auth", auth.with(auth_middlewear));
+    io.ns("/admin", admin.with(auth_middlewear));
 
     let app = axum::Router::new()
         .route("/", get(|| async { "Hello, World" }))
