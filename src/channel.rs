@@ -16,6 +16,8 @@ pub struct Channel {
     pub kind: ChannelKind,
     pub name: Option<String>,
     pub dm_user_low: Option<Uuid>,
+    pub dm_user_low_username: Option<String>,
     pub dm_user_high: Option<Uuid>,
+    pub dm_user_high_username: Option<String>,
     pub created_at: DateTime<Utc>,
 }

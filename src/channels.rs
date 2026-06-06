@@ -99,6 +99,46 @@ async fn access_channel(
     }
 }
 
+async fn username_of(user_id: &Uuid, db: &Pool<Sqlite>) -> Result<String, sqlx::Error> {
+    sqlx::query_scalar!("SELECT username FROM users WHERE user_id = ?1", user_id)
+        .fetch_one(db)
+        .await
+}
+
+/// Hydrate a channel row into the full Channel struct (with DM usernames joined).
+async fn fetch_channel(channel_id: &Uuid, db: &Pool<Sqlite>) -> Result<Channel, ChannelError> {
+    let row = sqlx::query!(
+        r#"SELECT
+            c.channel_id as "channel_id!: Uuid",
+            c.kind as "kind!: ChannelKind",
+            c.name,
+            c.dm_user_low as "dm_user_low: Uuid",
+            ulow.username as "dm_user_low_username: String",
+            c.dm_user_high as "dm_user_high: Uuid",
+            uhigh.username as "dm_user_high_username: String",
+            c.created_at as "created_at!: DateTime<Utc>"
+           FROM channels c
+           LEFT JOIN users ulow ON ulow.user_id = c.dm_user_low
+           LEFT JOIN users uhigh ON uhigh.user_id = c.dm_user_high
+           WHERE c.channel_id = ?1"#,
+        channel_id
+    )
+    .fetch_optional(db)
+    .await?
+    .ok_or(ChannelError::NotFound)?;
+
+    Ok(Channel {
+        channel_id: row.channel_id,
+        kind: row.kind,
+        name: row.name,
+        dm_user_low: row.dm_user_low,
+        dm_user_low_username: Some(row.dm_user_low_username),
+        dm_user_high: row.dm_user_high,
+        dm_user_high_username: Some(row.dm_user_high_username),
+        created_at: row.created_at,
+    })
+}
+
 #[derive(Deserialize, Debug)]
 #[serde(tag = "kind", rename_all = "lowercase")]
 pub enum ChannelCreateRequest {
@@ -145,18 +185,10 @@ async fn handle_channel_create(
             .await;
 
             match insert {
-                Ok(_) => Ok(Channel {
-                    channel_id,
-                    kind: ChannelKind::Dm,
-                    name: None,
-                    dm_user_low: Some(low),
-                    dm_user_high: Some(high),
-                    created_at: now,
-                }),
+                Ok(_) => fetch_channel(&channel_id, db).await,
                 Err(sqlx::Error::Database(e)) if e.is_unique_violation() => {
-                    let row = sqlx::query!(
-                        r#"SELECT channel_id as "channel_id!: Uuid",
-                                  created_at as "created_at!: DateTime<Utc>"
+                    let existing_id = sqlx::query_scalar!(
+                        r#"SELECT channel_id as "channel_id!: Uuid"
                            FROM channels
                            WHERE kind = 'dm' AND dm_user_low = ?1 AND dm_user_high = ?2"#,
                         low,
@@ -164,14 +196,7 @@ async fn handle_channel_create(
                     )
                     .fetch_one(db)
                     .await?;
-                    Ok(Channel {
-                        channel_id: row.channel_id,
-                        kind: ChannelKind::Dm,
-                        name: None,
-                        dm_user_low: Some(low),
-                        dm_user_high: Some(high),
-                        created_at: row.created_at,
-                    })
+                    fetch_channel(&existing_id, db).await
                 }
                 Err(e) => Err(e.into()),
             }
@@ -197,14 +222,7 @@ async fn handle_channel_create(
             .await;
 
             match result {
-                Ok(_) => Ok(Channel {
-                    channel_id,
-                    kind: ChannelKind::Text,
-                    name: Some(trimmed.to_string()),
-                    dm_user_low: None,
-                    dm_user_high: None,
-                    created_at: now,
-                }),
+                Ok(_) => fetch_channel(&channel_id, db).await,
                 Err(sqlx::Error::Database(e)) if e.is_unique_violation() => {
                     Err(ChannelError::BadRequest("channel name already taken"))
                 }
@@ -225,6 +243,7 @@ pub struct ChannelMessage {
     pub message_id: Uuid,
     pub channel_id: Uuid,
     pub author_id: Uuid,
+    pub author_username: String,
     pub seq: i64,
     pub content: Vec<u8>,
     pub created_at: DateTime<Utc>,
@@ -272,11 +291,14 @@ async fn handle_channel_send(
 
     tx.commit().await?;
 
+    let author_username = username_of(&me, db).await?;
+
     Ok((
         ChannelMessage {
             message_id,
             channel_id: req.channel_id,
             author_id: me,
+            author_username,
             seq: next_seq,
             content: req.content,
             created_at: now,
@@ -310,15 +332,17 @@ async fn handle_channel_sync(
     let messages = match req.since_seq {
         Some(since) => sqlx::query!(
             r#"SELECT
-                message_id as "message_id!: Uuid",
-                channel_id as "channel_id!: Uuid",
-                author_id as "author_id!: Uuid",
-                seq as "seq!: i64",
-                content as "content!: Vec<u8>",
-                created_at as "created_at!: DateTime<Utc>"
-               FROM messages
-               WHERE channel_id = ?1 AND seq > ?2
-               ORDER BY seq ASC
+                m.message_id as "message_id!: Uuid",
+                m.channel_id as "channel_id!: Uuid",
+                m.author_id as "author_id!: Uuid",
+                u.username as "author_username!: String",
+                m.seq as "seq!: i64",
+                m.content as "content!: Vec<u8>",
+                m.created_at as "created_at!: DateTime<Utc>"
+               FROM messages m
+               JOIN users u ON u.user_id = m.author_id
+               WHERE m.channel_id = ?1 AND m.seq > ?2
+               ORDER BY m.seq ASC
                LIMIT ?3"#,
             req.channel_id,
             since,
@@ -331,6 +355,7 @@ async fn handle_channel_sync(
             message_id: r.message_id,
             channel_id: r.channel_id,
             author_id: r.author_id,
+            author_username: r.author_username,
             seq: r.seq,
             content: r.content,
             created_at: r.created_at,
@@ -339,15 +364,17 @@ async fn handle_channel_sync(
         None => {
             let mut rows: Vec<ChannelMessage> = sqlx::query!(
                 r#"SELECT
-                    message_id as "message_id!: Uuid",
-                    channel_id as "channel_id!: Uuid",
-                    author_id as "author_id!: Uuid",
-                    seq as "seq!: i64",
-                    content as "content!: Vec<u8>",
-                    created_at as "created_at!: DateTime<Utc>"
-                   FROM messages
-                   WHERE channel_id = ?1
-                   ORDER BY seq DESC
+                    m.message_id as "message_id!: Uuid",
+                    m.channel_id as "channel_id!: Uuid",
+                    m.author_id as "author_id!: Uuid",
+                    u.username as "author_username!: String",
+                    m.seq as "seq!: i64",
+                    m.content as "content!: Vec<u8>",
+                    m.created_at as "created_at!: DateTime<Utc>"
+                   FROM messages m
+                   JOIN users u ON u.user_id = m.author_id
+                   WHERE m.channel_id = ?1
+                   ORDER BY m.seq DESC
                    LIMIT ?2"#,
                 req.channel_id,
                 limit
@@ -359,6 +386,7 @@ async fn handle_channel_sync(
                 message_id: r.message_id,
                 channel_id: r.channel_id,
                 author_id: r.author_id,
+                author_username: r.author_username,
                 seq: r.seq,
                 content: r.content,
                 created_at: r.created_at,
@@ -382,16 +410,20 @@ pub enum ChannelListResponse {
 async fn handle_channel_list(me: Uuid, db: &Pool<Sqlite>) -> Result<Vec<Channel>, ChannelError> {
     let rows = sqlx::query!(
         r#"SELECT
-            channel_id as "channel_id!: Uuid",
-            kind as "kind!: ChannelKind",
-            name,
-            dm_user_low as "dm_user_low: Uuid",
-            dm_user_high as "dm_user_high: Uuid",
-            created_at as "created_at!: DateTime<Utc>"
-           FROM channels
-           WHERE kind = 'text'
-              OR (kind = 'dm' AND (dm_user_low = ?1 OR dm_user_high = ?1))
-           ORDER BY created_at DESC"#,
+            c.channel_id as "channel_id!: Uuid",
+            c.kind as "kind!: ChannelKind",
+            c.name,
+            c.dm_user_low as "dm_user_low: Uuid",
+            ulow.username as "dm_user_low_username: String",
+            c.dm_user_high as "dm_user_high: Uuid",
+            uhigh.username as "dm_user_high_username: String",
+            c.created_at as "created_at!: DateTime<Utc>"
+           FROM channels c
+           LEFT JOIN users ulow ON ulow.user_id = c.dm_user_low
+           LEFT JOIN users uhigh ON uhigh.user_id = c.dm_user_high
+           WHERE c.kind = 'text'
+              OR (c.kind = 'dm' AND (c.dm_user_low = ?1 OR c.dm_user_high = ?1))
+           ORDER BY c.created_at DESC"#,
         me
     )
     .fetch_all(db)
@@ -404,7 +436,9 @@ async fn handle_channel_list(me: Uuid, db: &Pool<Sqlite>) -> Result<Vec<Channel>
             kind: r.kind,
             name: r.name,
             dm_user_low: r.dm_user_low,
+            dm_user_low_username: r.dm_user_low_username,
             dm_user_high: r.dm_user_high,
+            dm_user_high_username: r.dm_user_high_username,
             created_at: r.created_at,
         })
         .collect())
@@ -505,28 +539,7 @@ async fn handle_channel_rename(
         Err(e) => return Err(e.into()),
     }
 
-    let row = sqlx::query!(
-        r#"SELECT
-            channel_id as "channel_id!: Uuid",
-            kind as "kind!: ChannelKind",
-            name,
-            dm_user_low as "dm_user_low: Uuid",
-            dm_user_high as "dm_user_high: Uuid",
-            created_at as "created_at!: DateTime<Utc>"
-           FROM channels WHERE channel_id = ?1"#,
-        req.channel_id
-    )
-    .fetch_one(db)
-    .await?;
-
-    Ok(Channel {
-        channel_id: row.channel_id,
-        kind: row.kind,
-        name: row.name,
-        dm_user_low: row.dm_user_low,
-        dm_user_high: row.dm_user_high,
-        created_at: row.created_at,
-    })
+    fetch_channel(&req.channel_id, db).await
 }
 
 #[derive(Deserialize, Debug)]
@@ -568,6 +581,38 @@ async fn handle_channel_delete(
     } else {
         Err(ChannelError::NotFound)
     }
+}
+
+// ───── lookup_user (any authenticated user) ─────
+
+#[derive(Deserialize, Debug)]
+pub struct LookupUserRequest {
+    pub username: String,
+}
+
+#[derive(Serialize, Debug)]
+#[serde(tag = "status", rename_all = "lowercase")]
+pub enum LookupUserResponse {
+    Ok { user_id: Uuid, username: String },
+    Error { reason: String },
+}
+
+async fn handle_lookup_user(
+    req: LookupUserRequest,
+    db: &Pool<Sqlite>,
+) -> Result<(Uuid, String), ChannelError> {
+    let username = req.username.trim();
+    if username.is_empty() {
+        return Err(ChannelError::BadRequest("username is required"));
+    }
+    let row = sqlx::query!(
+        r#"SELECT user_id as "user_id!: Uuid", username FROM users WHERE username = ?1"#,
+        username
+    )
+    .fetch_optional(db)
+    .await?
+    .ok_or(ChannelError::NotFound)?;
+    Ok((row.user_id, row.username))
 }
 
 pub async fn channel(socket: SocketRef) {
@@ -778,6 +823,26 @@ pub async fn channel(socket: SocketRef) {
                 }
                 Err(e) => {
                     ack.send(&ChannelDeleteResponse::Error {
+                        reason: e.to_string(),
+                    })
+                    .ok();
+                }
+            }
+        },
+    );
+
+    socket.on(
+        "lookup_user",
+        async |_socket: SocketRef,
+               ack: AckSender,
+               Data::<LookupUserRequest>(data),
+               State(db): State<Pool<Sqlite>>| {
+            match handle_lookup_user(data, &db).await {
+                Ok((user_id, username)) => {
+                    ack.send(&LookupUserResponse::Ok { user_id, username }).ok();
+                }
+                Err(e) => {
+                    ack.send(&LookupUserResponse::Error {
                         reason: e.to_string(),
                     })
                     .ok();

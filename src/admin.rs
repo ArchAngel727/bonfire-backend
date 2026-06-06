@@ -60,7 +60,11 @@ pub enum SetModResponse {
 #[derive(Serialize, Debug)]
 #[serde(tag = "status", rename_all = "lowercase")]
 pub enum MyRoleResponse {
-    Ok { is_admin: bool, is_mod: bool },
+    Ok {
+        user_id: Uuid,
+        is_admin: bool,
+        is_mod: bool,
+    },
     Error { reason: String },
 }
 
@@ -157,7 +161,7 @@ pub async fn admin(socket: SocketRef) {
                 }
             };
 
-            ack.send(&MyRoleResponse::Ok { is_admin, is_mod }).ok();
+            ack.send(&MyRoleResponse::Ok { user_id: me, is_admin, is_mod }).ok();
         },
     );
 }

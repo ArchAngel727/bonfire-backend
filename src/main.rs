@@ -34,6 +34,7 @@ use crate::{
     admin::{admin, load_admin_from_env},
     auth::auth,
     auth_middlewear::auth_middlewear,
+    channels::channel,
     crypto_manager::CryptoManager,
     login::login,
     messages::message,
@@ -101,6 +102,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     io.ns("/register", register);
     io.ns("/auth", auth.with(auth_middlewear));
     io.ns("/admin", admin.with(auth_middlewear));
+    io.ns("/channel", channel.with(auth_middlewear));
 
     let app = axum::Router::new()
         .route("/", get(|| async { "Hello, World" }))
