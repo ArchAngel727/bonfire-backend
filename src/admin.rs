@@ -1,3 +1,7 @@
+use argon2::{
+    password_hash::{rand_core::OsRng, PasswordHash, PasswordVerifier, SaltString},
+    Argon2, PasswordHasher,
+};
 use serde::{Deserialize, Serialize};
 use socketioxide::extract::{AckSender, Data, SocketRef, State};
 use sqlx::{Pool, Sqlite};
@@ -65,6 +69,35 @@ pub enum MyRoleResponse {
         is_admin: bool,
         is_mod: bool,
     },
+    Error {
+        reason: String,
+    },
+}
+
+#[derive(Serialize, Debug)]
+#[serde(tag = "status", rename_all = "lowercase")]
+pub enum GetProfileResponse {
+    Ok {
+        user_id: Uuid,
+        username: String,
+        is_admin: bool,
+        is_mod: bool,
+    },
+    Error {
+        reason: String,
+    },
+}
+
+#[derive(Deserialize, Debug)]
+pub struct ChangePasswordRequest {
+    pub old_password: String,
+    pub new_password: String,
+}
+
+#[derive(Serialize, Debug)]
+#[serde(tag = "status", rename_all = "lowercase")]
+pub enum ChangePasswordResponse {
+    Ok,
     Error { reason: String },
 }
 
@@ -161,7 +194,172 @@ pub async fn admin(socket: SocketRef) {
                 }
             };
 
-            ack.send(&MyRoleResponse::Ok { user_id: me, is_admin, is_mod }).ok();
+            ack.send(&MyRoleResponse::Ok {
+                user_id: me,
+                is_admin,
+                is_mod,
+            })
+            .ok();
+        },
+    );
+
+    socket.on(
+        "get_profile",
+        async |socket: SocketRef,
+               ack: AckSender,
+               State(db): State<Pool<Sqlite>>,
+               State(admin): State<AdminId>| {
+            let Some(me) = current_user(&socket) else {
+                ack.send(&GetProfileResponse::Error {
+                    reason: "UNAUTHENTICATED".into(),
+                })
+                .ok();
+                return;
+            };
+
+            let row = match sqlx::query!(
+                r#"SELECT username as "username!: String", is_mod as "is_mod!: i64"
+                   FROM users WHERE user_id = ?1"#,
+                me,
+            )
+            .fetch_optional(&db)
+            .await
+            {
+                Ok(Some(r)) => r,
+                Ok(None) => {
+                    ack.send(&GetProfileResponse::Error {
+                        reason: "user not found".into(),
+                    })
+                    .ok();
+                    return;
+                }
+                Err(e) => {
+                    error!("get_profile db error: {e:?}");
+                    ack.send(&GetProfileResponse::Error {
+                        reason: "INTERNAL".into(),
+                    })
+                    .ok();
+                    return;
+                }
+            };
+
+            let is_admin = admin.is(&me);
+
+            ack.send(&GetProfileResponse::Ok {
+                user_id: me,
+                username: row.username,
+                is_admin,
+                is_mod: !is_admin && row.is_mod != 0,
+            })
+            .ok();
+        },
+    );
+
+    socket.on(
+        "change_password",
+        async |socket: SocketRef,
+               ack: AckSender,
+               Data::<ChangePasswordRequest>(req),
+               State(db): State<Pool<Sqlite>>| {
+            let Some(me) = current_user(&socket) else {
+                ack.send(&ChangePasswordResponse::Error {
+                    reason: "UNAUTHENTICATED".into(),
+                })
+                .ok();
+                return;
+            };
+
+            if req.new_password.len() < 6 {
+                ack.send(&ChangePasswordResponse::Error {
+                    reason: "new password must be at least 6 characters".into(),
+                })
+                .ok();
+                return;
+            }
+
+            let current_hash = match sqlx::query_scalar!(
+                "SELECT hashed_pw FROM users WHERE user_id = ?1",
+                me,
+            )
+            .fetch_optional(&db)
+            .await
+            {
+                Ok(Some(h)) => h,
+                Ok(None) => {
+                    ack.send(&ChangePasswordResponse::Error {
+                        reason: "user not found".into(),
+                    })
+                    .ok();
+                    return;
+                }
+                Err(e) => {
+                    error!("change_password lookup: {e:?}");
+                    ack.send(&ChangePasswordResponse::Error {
+                        reason: "INTERNAL".into(),
+                    })
+                    .ok();
+                    return;
+                }
+            };
+
+            let parsed = match PasswordHash::new(&current_hash) {
+                Ok(p) => p,
+                Err(e) => {
+                    error!("parse stored hash: {e:?}");
+                    ack.send(&ChangePasswordResponse::Error {
+                        reason: "INTERNAL".into(),
+                    })
+                    .ok();
+                    return;
+                }
+            };
+
+            if Argon2::default()
+                .verify_password(req.old_password.as_bytes(), &parsed)
+                .is_err()
+            {
+                ack.send(&ChangePasswordResponse::Error {
+                    reason: "current password is incorrect".into(),
+                })
+                .ok();
+                return;
+            }
+
+            let salt = SaltString::generate(&mut OsRng);
+            let new_hash = match Argon2::default()
+                .hash_password(req.new_password.as_bytes(), &salt)
+            {
+                Ok(h) => h.to_string(),
+                Err(e) => {
+                    error!("hash new password: {e:?}");
+                    ack.send(&ChangePasswordResponse::Error {
+                        reason: "INTERNAL".into(),
+                    })
+                    .ok();
+                    return;
+                }
+            };
+
+            let res = sqlx::query!(
+                "UPDATE users SET hashed_pw = ?1 WHERE user_id = ?2",
+                new_hash,
+                me,
+            )
+            .execute(&db)
+            .await;
+
+            match res {
+                Ok(_) => {
+                    ack.send(&ChangePasswordResponse::Ok).ok();
+                }
+                Err(e) => {
+                    error!("update password: {e:?}");
+                    ack.send(&ChangePasswordResponse::Error {
+                        reason: "INTERNAL".into(),
+                    })
+                    .ok();
+                }
+            }
         },
     );
 }

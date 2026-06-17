@@ -8,6 +8,7 @@ use uuid::Uuid;
 
 use crate::{
     channel::{Channel, ChannelKind},
+    message_crypto::MessageCrypto,
     permissions::{AdminId, can_create_text_channel, is_mod},
     user::UserID,
 };
@@ -259,12 +260,23 @@ pub enum ChannelSendResponse {
 async fn handle_channel_send(
     me: Uuid,
     req: ChannelSendRequest,
+    crypto: &MessageCrypto,
     db: &Pool<Sqlite>,
 ) -> Result<(ChannelMessage, ChannelAccess), ChannelError> {
     let access = access_channel(&me, &req.channel_id, db).await?;
 
     let message_id = Uuid::new_v4();
     let now = Utc::now();
+
+    // Text channels: encrypt before storing. DMs: store the bytes the client
+    // sent untouched (in phase 4 these will already be Olm ciphertext).
+    let stored_content: Vec<u8> = match access {
+        ChannelAccess::Text => crypto.encrypt(&req.content).map_err(|e| {
+            error!("encrypt failed: {e}");
+            ChannelError::Internal
+        })?,
+        ChannelAccess::Dm { .. } => req.content.clone(),
+    };
 
     let mut tx = db.begin().await?;
     let next_seq = sqlx::query_scalar!(
@@ -283,7 +295,7 @@ async fn handle_channel_send(
         req.channel_id,
         me,
         next_seq,
-        req.content,
+        stored_content,
         now
     )
     .execute(&mut *tx)
@@ -293,6 +305,8 @@ async fn handle_channel_send(
 
     let author_username = username_of(&me, db).await?;
 
+    // Broadcast and ack carry the plaintext (or, for DMs in phase 4, the
+    // client's Olm ciphertext as-is). Only the row in the DB is encrypted.
     Ok((
         ChannelMessage {
             message_id,
@@ -324,12 +338,13 @@ pub enum ChannelSyncResponse {
 async fn handle_channel_sync(
     me: Uuid,
     req: ChannelSyncRequest,
+    crypto: &MessageCrypto,
     db: &Pool<Sqlite>,
 ) -> Result<Vec<ChannelMessage>, ChannelError> {
-    access_channel(&me, &req.channel_id, db).await?;
+    let access = access_channel(&me, &req.channel_id, db).await?;
     let limit = req.limit.unwrap_or(50).clamp(1, 200);
 
-    let messages = match req.since_seq {
+    let mut messages: Vec<ChannelMessage> = match req.since_seq {
         Some(since) => sqlx::query!(
             r#"SELECT
                 m.message_id as "message_id!: Uuid",
@@ -396,6 +411,22 @@ async fn handle_channel_sync(
             rows
         }
     };
+
+    // Decrypt text channel content; DM content is returned as stored.
+    if matches!(access, ChannelAccess::Text) {
+        for msg in &mut messages {
+            match crypto.decrypt(&msg.content) {
+                Ok(plain) => msg.content = plain,
+                Err(e) => {
+                    error!(
+                        "decrypt failed for message {}: {e}; returning placeholder",
+                        msg.message_id
+                    );
+                    msg.content = b"[decryption failed]".to_vec();
+                }
+            }
+        }
+    }
 
     Ok(messages)
 }
@@ -677,7 +708,8 @@ pub async fn channel(socket: SocketRef) {
         async |socket: SocketRef,
                ack: AckSender,
                Data::<ChannelSendRequest>(data),
-               State(db): State<Pool<Sqlite>>| {
+               State(db): State<Pool<Sqlite>>,
+               State(crypto): State<MessageCrypto>| {
             let me = match current_user(&socket) {
                 Ok(u) => u,
                 Err(e) => {
@@ -688,7 +720,7 @@ pub async fn channel(socket: SocketRef) {
                     return;
                 }
             };
-            match handle_channel_send(me, data, &db).await {
+            match handle_channel_send(me, data, &crypto, &db).await {
                 Ok((message, access)) => {
                     if let Err(e) = socket
                         .to(access.rooms())
@@ -714,7 +746,8 @@ pub async fn channel(socket: SocketRef) {
         async |socket: SocketRef,
                ack: AckSender,
                Data::<ChannelSyncRequest>(data),
-               State(db): State<Pool<Sqlite>>| {
+               State(db): State<Pool<Sqlite>>,
+               State(crypto): State<MessageCrypto>| {
             let me = match current_user(&socket) {
                 Ok(u) => u,
                 Err(e) => {
@@ -725,7 +758,7 @@ pub async fn channel(socket: SocketRef) {
                     return;
                 }
             };
-            match handle_channel_sync(me, data, &db).await {
+            match handle_channel_sync(me, data, &crypto, &db).await {
                 Ok(messages) => {
                     ack.send(&ChannelSyncResponse::Ok { messages }).ok();
                 }

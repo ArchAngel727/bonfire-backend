@@ -6,13 +6,12 @@ mod channels;
 mod cookie;
 mod crypto_manager;
 mod login;
+mod message_crypto;
 mod messages;
 mod permissions;
 mod register;
 mod session;
 mod user;
-
-use std::time::Duration;
 
 use axum::routing::get;
 use chrono::Utc;
@@ -24,6 +23,7 @@ use socketioxide::{
     handler::ConnectHandler,
 };
 use sqlx::{Pool, Sqlite, sqlite::SqlitePoolOptions};
+use std::{path::PathBuf, time::Duration};
 use tokio::time::interval;
 use tower::ServiceBuilder;
 use tower_http::cors::CorsLayer;
@@ -37,6 +37,7 @@ use crate::{
     channels::channel,
     crypto_manager::CryptoManager,
     login::login,
+    message_crypto::MessageCrypto,
     messages::message,
     register::register,
 };
@@ -88,12 +89,15 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     let admin_id = load_admin_from_env();
 
+    let crypto = MessageCrypto::load_or_create(&PathBuf::from("./data/message.key"))?;
+
     let (layer, io) = SocketIo::builder()
         .max_payload(10_000_000)
         .max_buffer_size(10_000)
         .with_state(db.clone())
         .with_state(cm.clone())
         .with_state(admin_id)
+        .with_state(crypto)
         .build_layer();
 
     io.ns("/", root);
