@@ -800,6 +800,45 @@ pub async fn channel(socket: SocketRef) {
     );
 
     socket.on(
+        "channel_delete_message",
+        async |socket: SocketRef,
+               ack: AckSender,
+               Data::<ChannelDeleteMessageRequest>(data),
+               State(db): State<Pool<Sqlite>>,
+               State(admin): State<AdminId>| {
+            let me = match current_user(&socket) {
+                Ok(u) => u,
+                Err(e) => {
+                    ack.send(&ChannelDeleteMessageResponse::Error {
+                        reason: e.to_string(),
+                    })
+                    .ok();
+                    return;
+                }
+            };
+            match handle_channel_delete_message(me, &data, &admin, &db).await {
+                Ok(access) => {
+                    let payload = serde_json::json!({
+                        "channel_id": data.channel_id,
+                        "message_id": data.message_id,
+                    });
+                    let _ = socket
+                        .to(access.rooms())
+                        .emit("channel_message_deleted", &payload)
+                        .await;
+                    ack.send(&ChannelDeleteMessageResponse::Ok).ok();
+                }
+                Err(e) => {
+                    ack.send(&ChannelDeleteMessageResponse::Error {
+                        reason: e.to_string(),
+                    })
+                    .ok();
+                }
+            }
+        },
+    );
+
+    socket.on(
         "channel_rename",
         async |socket: SocketRef,
                ack: AckSender,
