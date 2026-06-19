@@ -24,6 +24,8 @@ pub enum LoginError {
     Missing,
     #[error("SESSION_INVALID")]
     Invalid,
+    #[error("BANNED")]
+    Banned,
     #[error("INTERNAL_ERROR {0}")]
     Internal(#[from] sqlx::Error),
 }
@@ -63,6 +65,17 @@ async fn handle_login(
         .is_err()
     {
         return Err(LoginError::Invalid);
+    }
+
+    // Refuse banned users.
+    let banned: Option<(Vec<u8>,)> = sqlx::query_as(
+        "SELECT user_id FROM banned_users WHERE user_id = ?1",
+    )
+    .bind(user.user_id)
+    .fetch_optional(db)
+    .await?;
+    if banned.is_some() {
+        return Err(LoginError::Banned);
     }
 
     let mut session_id = [0; 16];

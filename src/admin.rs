@@ -101,6 +101,31 @@ pub enum ChangePasswordResponse {
     Error { reason: String },
 }
 
+#[derive(Deserialize, Debug)]
+pub struct BanUserRequest {
+    pub user_id: Uuid,
+    pub reason: Option<String>,
+}
+
+#[derive(Serialize, Debug)]
+#[serde(tag = "status", rename_all = "lowercase")]
+pub enum BanUserResponse {
+    Ok,
+    Error { reason: String },
+}
+
+#[derive(Deserialize, Debug)]
+pub struct UnbanUserRequest {
+    pub user_id: Uuid,
+}
+
+#[derive(Serialize, Debug)]
+#[serde(tag = "status", rename_all = "lowercase")]
+pub enum UnbanUserResponse {
+    Ok,
+    Error { reason: String },
+}
+
 pub async fn admin(socket: SocketRef) {
     socket.on(
         "set_mod",
@@ -348,13 +373,208 @@ pub async fn admin(socket: SocketRef) {
             .execute(&db)
             .await;
 
-            match res {
+            if let Err(e) = res {
+                error!("update password: {e:?}");
+                ack.send(&ChangePasswordResponse::Error {
+                    reason: "INTERNAL".into(),
+                })
+                .ok();
+                return;
+            }
+
+            // Kill all sessions for this user so stale tabs on other devices
+            // (and this one) re-authenticate with the new password.
+            if let Err(e) = sqlx::query!(
+                "DELETE FROM sessions WHERE user_id = ?1",
+                me,
+            )
+            .execute(&db)
+            .await
+            {
+                error!("change_password session purge: {e:?}");
+                // Don't fail the request — password is already updated.
+            }
+
+            ack.send(&ChangePasswordResponse::Ok).ok();
+        },
+    );
+
+    socket.on(
+        "ban_user",
+        async |socket: SocketRef,
+               ack: AckSender,
+               Data::<BanUserRequest>(data),
+               State(db): State<Pool<Sqlite>>,
+               State(admin): State<AdminId>| {
+            let Some(me) = current_user(&socket) else {
+                ack.send(&BanUserResponse::Error {
+                    reason: "UNAUTHENTICATED".into(),
+                })
+                .ok();
+                return;
+            };
+
+            // Caller must be admin or mod.
+            let caller_is_admin = admin.is(&me);
+            let caller_is_mod = if caller_is_admin {
+                false
+            } else {
+                match is_mod(&me, &db).await {
+                    Ok(v) => v,
+                    Err(e) => {
+                        error!("ban_user role check: {e:?}");
+                        ack.send(&BanUserResponse::Error {
+                            reason: "INTERNAL".into(),
+                        })
+                        .ok();
+                        return;
+                    }
+                }
+            };
+            if !caller_is_admin && !caller_is_mod {
+                ack.send(&BanUserResponse::Error {
+                    reason: "FORBIDDEN".into(),
+                })
+                .ok();
+                return;
+            }
+
+            // Target cannot be admin.
+            if admin.is(&data.user_id) {
+                ack.send(&BanUserResponse::Error {
+                    reason: "cannot ban the admin".into(),
+                })
+                .ok();
+                return;
+            }
+
+            // Cannot ban self.
+            if data.user_id == me {
+                ack.send(&BanUserResponse::Error {
+                    reason: "cannot ban yourself".into(),
+                })
+                .ok();
+                return;
+            }
+
+            // Mods cannot ban other mods (admin can).
+            if caller_is_mod {
+                match is_mod(&data.user_id, &db).await {
+                    Ok(true) => {
+                        ack.send(&BanUserResponse::Error {
+                            reason: "mods cannot ban other mods".into(),
+                        })
+                        .ok();
+                        return;
+                    }
+                    Ok(false) => {}
+                    Err(e) => {
+                        error!("ban_user target role check: {e:?}");
+                        ack.send(&BanUserResponse::Error {
+                            reason: "INTERNAL".into(),
+                        })
+                        .ok();
+                        return;
+                    }
+                }
+            }
+
+            // Insert the ban + kill all of the target's sessions in one transaction.
+            let now = chrono::Utc::now().timestamp();
+            let mut tx = match db.begin().await {
+                Ok(t) => t,
+                Err(e) => {
+                    error!("ban_user tx begin: {e:?}");
+                    ack.send(&BanUserResponse::Error {
+                        reason: "INTERNAL".into(),
+                    })
+                    .ok();
+                    return;
+                }
+            };
+
+            let insert = sqlx::query!(
+                "INSERT OR REPLACE INTO banned_users (user_id, banned_at, banned_by, reason)
+                 VALUES (?1, ?2, ?3, ?4)",
+                data.user_id,
+                now,
+                me,
+                data.reason,
+            )
+            .execute(&mut *tx)
+            .await;
+
+            if let Err(e) = insert {
+                error!("ban_user insert: {e:?}");
+                ack.send(&BanUserResponse::Error {
+                    reason: "INTERNAL".into(),
+                })
+                .ok();
+                return;
+            }
+
+            if let Err(e) = sqlx::query!(
+                "DELETE FROM sessions WHERE user_id = ?1",
+                data.user_id,
+            )
+            .execute(&mut *tx)
+            .await
+            {
+                error!("ban_user delete sessions: {e:?}");
+                ack.send(&BanUserResponse::Error {
+                    reason: "INTERNAL".into(),
+                })
+                .ok();
+                return;
+            }
+
+            if let Err(e) = tx.commit().await {
+                error!("ban_user commit: {e:?}");
+                ack.send(&BanUserResponse::Error {
+                    reason: "INTERNAL".into(),
+                })
+                .ok();
+                return;
+            }
+
+            ack.send(&BanUserResponse::Ok).ok();
+        },
+    );
+
+    socket.on(
+        "unban_user",
+        async |socket: SocketRef,
+               ack: AckSender,
+               Data::<UnbanUserRequest>(data),
+               State(db): State<Pool<Sqlite>>,
+               State(admin): State<AdminId>| {
+            let Some(me) = current_user(&socket) else {
+                ack.send(&UnbanUserResponse::Error {
+                    reason: "UNAUTHENTICATED".into(),
+                })
+                .ok();
+                return;
+            };
+
+            // Only admin can unban.
+            if !admin.is(&me) {
+                ack.send(&UnbanUserResponse::Error {
+                    reason: "FORBIDDEN".into(),
+                })
+                .ok();
+                return;
+            }
+
+            match sqlx::query!("DELETE FROM banned_users WHERE user_id = ?1", data.user_id)
+                .execute(&db)
+                .await
+            {
                 Ok(_) => {
-                    ack.send(&ChangePasswordResponse::Ok).ok();
+                    ack.send(&UnbanUserResponse::Ok).ok();
                 }
                 Err(e) => {
-                    error!("update password: {e:?}");
-                    ack.send(&ChangePasswordResponse::Error {
+                    error!("unban_user: {e:?}");
+                    ack.send(&UnbanUserResponse::Error {
                         reason: "INTERNAL".into(),
                     })
                     .ok();
