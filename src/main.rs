@@ -5,6 +5,7 @@ mod channel;
 mod channels;
 mod cookie;
 mod crypto_manager;
+mod keys;
 mod login;
 mod message_crypto;
 mod messages;
@@ -36,6 +37,7 @@ use crate::{
     auth_middlewear::auth_middlewear,
     channels::channel,
     crypto_manager::CryptoManager,
+    keys::keys,
     login::login,
     message_crypto::MessageCrypto,
     messages::message,
@@ -107,6 +109,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     io.ns("/auth", auth.with(auth_middlewear));
     io.ns("/admin", admin.with(auth_middlewear));
     io.ns("/channel", channel.with(auth_middlewear));
+    io.ns("/keys", keys.with(auth_middlewear));
 
     let app = axum::Router::new()
         .route("/", get(|| async { "Hello, World" }))
