@@ -102,6 +102,25 @@ pub enum ChangePasswordResponse {
 }
 
 #[derive(Deserialize, Debug)]
+pub struct FindUserRequest {
+    pub username: String,
+}
+
+#[derive(Serialize, Debug)]
+#[serde(tag = "status", rename_all = "lowercase")]
+pub enum FindUserResponse {
+    Ok {
+        user_id: Uuid,
+        username: String,
+        is_admin: bool,
+        is_mod: bool,
+    },
+    Error {
+        reason: String,
+    },
+}
+
+#[derive(Deserialize, Debug)]
 pub struct BanUserRequest {
     pub user_id: Uuid,
     pub reason: Option<String>,
@@ -580,6 +599,70 @@ pub async fn admin(socket: SocketRef) {
                     .ok();
                 }
             }
+        },
+    );
+
+    socket.on(
+        "find_user",
+        async |socket: SocketRef,
+               ack: AckSender,
+               Data::<FindUserRequest>(data),
+               State(db): State<Pool<Sqlite>>,
+               State(admin): State<AdminId>| {
+            let Some(me) = current_user(&socket) else {
+                ack.send(&FindUserResponse::Error {
+                    reason: "UNAUTHENTICATED".into(),
+                })
+                .ok();
+                return;
+            };
+
+            if !admin.is(&me) {
+                ack.send(&FindUserResponse::Error {
+                    reason: "FORBIDDEN".into(),
+                })
+                .ok();
+                return;
+            }
+
+            let row = match sqlx::query!(
+                r#"SELECT
+                    user_id as "user_id!: Uuid",
+                    username as "username!: String",
+                    is_mod as "is_mod!: i64"
+                   FROM users WHERE username = ?1"#,
+                data.username,
+            )
+            .fetch_optional(&db)
+            .await
+            {
+                Ok(Some(r)) => r,
+                Ok(None) => {
+                    ack.send(&FindUserResponse::Error {
+                        reason: "user not found".into(),
+                    })
+                    .ok();
+                    return;
+                }
+                Err(e) => {
+                    error!("find_user db error: {e:?}");
+                    ack.send(&FindUserResponse::Error {
+                        reason: "INTERNAL".into(),
+                    })
+                    .ok();
+                    return;
+                }
+            };
+
+            let is_admin = admin.is(&row.user_id);
+
+            ack.send(&FindUserResponse::Ok {
+                user_id: row.user_id,
+                username: row.username,
+                is_admin,
+                is_mod: !is_admin && row.is_mod != 0,
+            })
+            .ok();
         },
     );
 }
